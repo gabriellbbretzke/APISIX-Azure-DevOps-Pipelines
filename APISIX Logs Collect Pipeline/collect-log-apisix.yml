@@ -1,0 +1,119 @@
+trigger: none
+
+parameters:
+  - name: environment
+    displayName: Qual o ambiente para deploy?
+    type: string
+    default: 'DEV'
+    values:
+    - DEV
+    - SIT
+    - UAT
+    - PREPRD
+    - PRD
+
+variables:
+  - name: AZURE_SUBSCRIPTION
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: EXAMPLE-PRD-SUBSCRIPTION
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: EXAMPLE-PREPRD-SUBSCRIPTION
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: EXAMPLE-UAT-SUBSCRIPTION
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: EXAMPLE-SIT-SUBSCRIPTION
+    ${{ if eq( parameters['environment'], 'DEV') }}:
+      value: EXAMPLE-DEV-SUBSCRIPTION
+  - name: VAR_ENVIRONMENT
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: prd
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: preprd
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: uat
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: sit
+    ${{ if eq( parameters['environment'], 'DEV') }}:
+      value: dev
+  - name: RESOURCE_GROUP
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: example-prd-resource-group
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: example-preprd-resource-group
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: example-uat-resource-group
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: example-sit-resource-group
+    ${{ if eq( parameters['environment'], 'DEV') }}:
+      value: example-dev-resource-group
+  - name: AKS_CLUSTER
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: aks-prd-cluster
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: aks-preprd-cluster
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: aks-uat-cluster
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: aks-sit-cluster
+    ${{ if eq( parameters['environment'], 'DEV') }}:
+      value: aks-dev-cluster
+  - name: AKS_NAMESPACE
+    value: example-namespace
+
+resources:
+  repositories:
+    - repository: logsRepo
+      type: git
+      name: ExampleLogsRepo
+
+stages:
+- stage: Connect
+  displayName: Connect to AKS
+  jobs:
+  - job: ConnectAzureCLI
+    displayName: Connect to Azure CLI
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: $(AZURE_SUBSCRIPTION)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          # Autentica usando o Service Principal
+          az login --service-principal -u $(servicePrincipalId) -p $(servicePrincipalKey) --tenant $(tenantId)
+
+          # Instala o Azure CLI AKS extension
+          az aks install-cli
+
+          # Obtém credenciais do AKS
+          az aks get-credentials --resource-group $(RESOURCE_GROUP) --name $(AKS_CLUSTER) --overwrite-existing --admin
+
+          # Configura a identidade do cluster para o kubectl
+          kubelogin convert-kubeconfig -l msi
+
+          #Collect APISIX Logs pod
+          APISIX_POD=$(kubectl get pods -n $(AKS_NAMESPACE) -l app.kubernetes.io/name=apisix -o jsonpath='{.items[0].metadata.name}')
+          if [ -z "$APISIX_POD" ]; then
+            echo "No APISIX pod found"
+            exit 1
+          fi
+          kubectl exec -it $APISIX_POD -n $(AKS_NAMESPACE) -- cat /usr/local/apisix/logs/routes_access.log > $(Build.ArtifactStagingDirectory)/apisix-logs-$VAR_ENVIRONMENT.txt
+    
+    - checkout: logsRepo
+      displayName: 'Checkout logs repository'
+    
+    - script: |
+        git config --global user.email "collect_logs_apisix@example.com"
+        git config --global user.name "collect_logs_apisix"
+        git remote set-url origin https://$(System.AccessToken)@dev.azure.com/example/ExampleLogsRepo/_git/ExampleLogsRepo
+        git fetch --prune
+        git checkout apisixlogs
+        cp $(Build.ArtifactStagingDirectory)/apisix-logs-$VAR_ENVIRONMENT.txt .
+        git add apisix-logs-$VAR_ENVIRONMENT.txt
+        git commit -m "Add APISIX logs $(Build.BuildId)"
+        git push -u origin apisixlogs
+      displayName: 'Commit logs to Azure DevOps repository'
+      env:
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)

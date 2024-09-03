@@ -50,11 +50,11 @@ jobs:
         kubelogin convert-kubeconfig -l azurecli
 
         # Define o nome do pod APISIX
-        APISIX_POD_DEST=$(kubectl get pods -n network-provisioner -l app.kubernetes.io/name=apisix -o jsonpath="{.items[0].metadata.name}")
+        APISIX_POD_DEST=$(kubectl get pods -n $(AKS_NAMESPACE) -l app.kubernetes.io/name=apisix -o jsonpath="{.items[0].metadata.name}")
 
         # Faz o port-forward do pod APISIX para a máquina local
         echo $APISIX_POD_DEST
-        kubectl port-forward -n network-provisioner $APISIX_POD_DEST 8888:9180 & PORT_FORWARD_PID_DEST=$!
+        kubectl port-forward -n $(AKS_NAMESPACE) $APISIX_POD_DEST 8888:9180 & PORT_FORWARD_PID_DEST=$!
         sleep 5
 
         curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/upstreams" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_upstreams_url_dest.json

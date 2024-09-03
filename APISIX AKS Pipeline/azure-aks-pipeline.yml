@@ -1,0 +1,335 @@
+# yaml-language-server: $schema='none'
+trigger: none
+
+parameters:
+  - name: environment
+    displayName: Qual o ambiente para deploy?
+    type: string
+    default: 'DEV'
+    values:
+    - DEV
+    - SIT
+    - UAT
+    - PREPRD
+    - PRD
+
+variables:
+  - name: AZURE_SUBSCRIPTION
+    ${{ if eq(parameters['environment'], 'PRD') }}:
+      value: example-subscription-prd
+    ${{ if eq(parameters['environment'], 'PREPRD') }}:
+      value: example-subscription-preprd
+    ${{ if eq(parameters['environment'], 'UAT') }}:
+      value: example-subscription-uat
+    ${{ if eq(parameters['environment'], 'SIT') }}:
+      value: example-subscription-sit
+    ${{ if eq(parameters['environment'], 'DEV') }}:
+      value: example-subscription-dev
+  - name: VAR_ENVIRONMENT
+    ${{ if eq(parameters['environment'], 'PRD') }}:
+      value: prd
+    ${{ if eq(parameters['environment'], 'PREPRD') }}:
+      value: preprd
+    ${{ if eq(parameters['environment'], 'UAT') }}:
+      value: uat
+    ${{ if eq(parameters['environment'], 'SIT') }}:
+      value: sit
+    ${{ if eq(parameters['environment'], 'DEV') }}:
+      value: dev
+  - name: RESOURCE_GROUP
+    ${{ if eq(parameters['environment'], 'PRD') }}:
+      value: example-rg-prd
+    ${{ if eq(parameters['environment'], 'PREPRD') }}:
+      value: example-rg-preprd
+    ${{ if eq(parameters['environment'], 'UAT') }}:
+      value: example-rg-uat
+    ${{ if eq(parameters['environment'], 'SIT') }}:
+      value: example-rg-sit
+    ${{ if eq(parameters['environment'], 'DEV') }}:
+      value: example-rg-dev
+  - name: AKS_CLUSTER
+    ${{ if eq(parameters['environment'], 'PRD') }}:
+      value: aks-cluster-prd
+    ${{ if eq(parameters['environment'], 'PREPRD') }}:
+      value: aks-cluster-preprd
+    ${{ if eq(parameters['environment'], 'UAT') }}:
+      value: aks-cluster-uat
+    ${{ if eq(parameters['environment'], 'SIT') }}:
+      value: aks-cluster-sit
+    ${{ if eq(parameters['environment'], 'DEV') }}:
+      value: aks-cluster-dev
+  - name: AKS_NAMESPACE
+    value: example-namespace
+
+stages:
+- stage: Deploy
+  displayName: Deploy to AKS
+  jobs:
+  - job: DeployAPISIX
+    displayName: Deploy APISIX
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: $(AZURE_SUBSCRIPTION)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          # Autentica usando o Service Principal
+          az login --service-principal -u $(servicePrincipalId) -p $(servicePrincipalKey) --tenant $(tenantId)
+
+          # Instala o Azure CLI AKS extension
+          az aks install-cli
+
+          # Obtém credenciais do AKS
+          az aks get-credentials --resource-group $(RESOURCE_GROUP) --name $(AKS_CLUSTER) --overwrite-existing --admin
+
+          # Configura a identidade do cluster para o kubectl
+          kubelogin convert-kubeconfig -l msi
+
+          # Cria um namespace para o APISIX
+          kubectl create namespace $(AKS_NAMESPACE) || true
+          kubectl config set-context --current --namespace=$(AKS_NAMESPACE)
+
+    - script: |
+        curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+      displayName: Install Helm
+
+    - script: |
+        helm repo add apisix https://charts.apiseven.com
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        helm repo update
+      displayName: Add and Update Helm Repositories
+
+    - script: |
+        # helm uninstall apisix --namespace $(AKS_NAMESPACE) || true
+        # helm uninstall apisix-dashboard --namespace $(AKS_NAMESPACE) || true
+        helm upgrade --install apisix apisix/apisix --namespace $(AKS_NAMESPACE) --set apisix.ssl.enabled=true --set-json 'apisix.admin.allow.ipList=["127.0.0.1/24","192.168.253.0/24","172.16.0.0/12"]' --set apisix.admin.credentials.admin=example-admin-key --set apisix.admin.credentials.viewer=example-viewer-key
+        helm upgrade --install apisix-dashboard apisix/apisix-dashboard --namespace $(AKS_NAMESPACE) --set-json 'config.authentication.users=[{"username":"admin","password":"example-admin-password"},{"username":"viewer","password":"example-viewer-password"}]'
+      displayName: Install APISIX
+
+- stage: DeployIngresses
+  displayName: Deploy Ingresses to AKS
+  dependsOn: Deploy
+  jobs:
+  - job: DeployIngressesToAPISIX
+    displayName: Deploy Ingresses To APISIX
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: AzureCLI@2
+      displayName: Connect to Azure CLI
+      inputs:
+        azureSubscription: $(AZURE_SUBSCRIPTION)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          # Autentica usando o Service Principal
+          az login --service-principal -u $(servicePrincipalId) -p $(servicePrincipalKey) --tenant $(tenantId)
+
+          # Instala o Azure CLI AKS extension
+          az aks install-cli
+
+          # Obtém credenciais do AKS
+          az aks get-credentials --resource-group $(RESOURCE_GROUP) --name $(AKS_CLUSTER) --overwrite-existing --admin
+
+          # Configura a identidade do cluster para o kubectl
+          kubelogin convert-kubeconfig -l msi
+
+    - task: AzureCLI@2
+      displayName: Admin Ingress Yaml Configuration
+      inputs:
+        azureSubscription: $(AZURE_SUBSCRIPTION)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          # Wait for the LoadBalancer IP to be assigned
+          echo "Waiting for LoadBalancer IP..."
+          while true; do
+            INGRESS_IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+            if [ -n "$INGRESS_IP" ]; then
+              echo "Ingress Controller IP: $INGRESS_IP"
+              break
+            else
+              echo "Ingress Controller IP not assigned yet. Waiting..."
+              sleep 10
+            fi
+          done
+
+          # Apply the Ingress configuration
+          cat <<EOF | kubectl apply -f -
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: admin-ingress
+            namespace: $(AKS_NAMESPACE)
+            annotations:
+              kubernetes.io/ingress.class: nginx
+          spec:
+            tls:
+              - hosts:
+                  - admin-ingress-$(VAR_ENVIRONMENT).example.com
+            rules:
+              - host: admin-ingress-$(VAR_ENVIRONMENT).example.com
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: apisix-admin
+                          port:
+                            number: 9180
+          status:
+            loadBalancer:
+              ingress:
+                - ip: $INGRESS_IP
+          EOF
+
+    - task: AzureCLI@2
+      displayName: Dashboard Ingress Yaml Configuration
+      inputs:
+        azureSubscription: $(AZURE_SUBSCRIPTION)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          # Apply the Ingress configuration
+          cat <<EOF | kubectl apply -f -
+          kind: Ingress
+          apiVersion: networking.k8s.io/v1
+          metadata:
+            name: dashboard-ingress
+            namespace: $(AKS_NAMESPACE)
+            annotations:
+              kubernetes.io/ingress.class: nginx
+              kubernetes.io/tls-acme: 'true'
+              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+          spec:
+            tls:
+              - hosts:
+                  - dashboard-ingress-$(VAR_ENVIRONMENT).example.com
+                secretName: example-tls-secret
+            rules:
+              - host: dashboard-ingress-$(VAR_ENVIRONMENT).example.com
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: apisix-dashboard
+                          port:
+                            number: 80
+          status:
+            loadBalancer:
+              ingress:
+                - ip: $INGRESS_IP
+          EOF
+
+    - task: AzureCLI@2
+      displayName: Ingress Yaml Configuration
+      inputs:
+        azureSubscription: $(AZURE_SUBSCRIPTION)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          # Apply the Ingress configuration
+          cat <<EOF | kubectl apply -f -
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: apisix-ingress
+            namespace: $(AKS_NAMESPACE)
+            annotations:
+              kubernetes.io/ingress.class: nginx            
+          spec:
+            rules:
+              - host: apisix-ingress-$(VAR_ENVIRONMENT).example.com
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: apisix-gateway
+                          port:
+                            number: 80
+            tls:
+              - hosts:
+                  - apisix-ingress-$(VAR_ENVIRONMENT).example.com
+          status:
+            loadBalancer:
+              ingress:
+                - ip: $INGRESS_IP
+          EOF
+
+- task: AzureCLI@2
+  displayName: Secret Yaml Configuration
+  inputs:
+    azureSubscription: $(AZURE_SUBSCRIPTION)
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      cat <<EOF | kubectl apply -f -
+      kind: Secret
+      apiVersion: v1
+      metadata:
+        name: digicert-$VAR_ENVIRONMENT
+        namespace: example-namespace
+      data:
+        tls.crt: >-
+          <BASE64_ENCODED_CERTIFICATE>
+        tls.key: >-
+          <BASE64_ENCODED_PRIVATE_KEY>
+      type: kubernetes.io/tls
+      EOF
+
+- task: AzureCLI@2
+  displayName: ClusterIssuer Yaml Configuration
+  inputs:
+    azureSubscription: $(AZURE_SUBSCRIPTION)
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      cat <<EOF | kubectl apply -f -
+      apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      metadata:
+        name: digicert-$VAR_ENVIRONMENT
+      spec:
+        acme:
+          email: example@example.com
+          privateKeySecretRef:
+            name: digicert-$VAR_ENVIRONMENT
+          server: https://acme.example.com/v2/directory
+          solvers:
+            - http01:
+                ingress:
+                  class: nginx
+      EOF
+
+- task: AzureCLI@2
+  displayName: Certificate Yaml Configuration
+  inputs:
+    azureSubscription: $(AZURE_SUBSCRIPTION)
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      cat <<EOF | kubectl apply -f -
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: example-tls
+        namespace: example-namespace
+      spec:
+        dnsNames:
+          - example-$VAR_ENVIRONMENT.example.com
+          - dashboard-example-$VAR_ENVIRONMENT.example.com
+          - admin-example-$VAR_ENVIRONMENT.example.com
+        issuerRef:
+          kind: ClusterIssuer
+          name: digicert-$VAR_ENVIRONMENT
+        secretName: digicert-$VAR_ENVIRONMENT
+      EOF
