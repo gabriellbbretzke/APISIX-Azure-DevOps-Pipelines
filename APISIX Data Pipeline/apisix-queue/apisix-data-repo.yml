@@ -1,0 +1,204 @@
+jobs:
+- job: ImportApisixDataFromRepository
+  displayName: Import Apisix Data From Repository
+  pool:
+    vmImage: ubuntu-latest
+  steps:
+  - task: AzureCLI@2
+    displayName: Connect to Azure Destination
+    inputs:
+      azureSubscription: $(AZURE_SUBSCRIPTION_DEST)
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        # Autentica usando o Service Principal
+        az login --service-principal -u $(servicePrincipalId) -p $(servicePrincipalKey) --tenant $(tenantId)
+
+        # Instala o Azure CLI AKS extension
+        az aks install-cli        
+
+        # Exporta configurações do cluster de origem
+        echo "Fetching configurations from source REPOSITORY..."
+        echo "ENV_FOLDER: FilesToImport/$ENV_FOLDER"
+
+        # Obtem os dados no repositório
+        echo "Get data to repository..."
+        git config --global user.email "your_email@example.com"
+        git config --global user.name "your_username"
+        git remote set-url origin https://$(System.AccessToken)@your_azure_repo_url
+        git fetch --prune
+        git checkout apisix_data
+        cp ./FilesToImport/$ENV_FOLDER/upstreams.json  $(Build.ArtifactStagingDirectory)/
+        cp ./FilesToImport/$ENV_FOLDER/routes.json  $(Build.ArtifactStagingDirectory)/
+        cp ./FilesToImport/$ENV_FOLDER/services.json  $(Build.ArtifactStagingDirectory)/
+        cp ./FilesToImport/$ENV_FOLDER/consumers.json  $(Build.ArtifactStagingDirectory)/
+        cp ./FilesToImport/$ENV_FOLDER/ssls.json  $(Build.ArtifactStagingDirectory)/
+        cp ./FilesToImport/$ENV_FOLDER/global_rules.json  $(Build.ArtifactStagingDirectory)/
+        cp ./FilesToImport/$ENV_FOLDER/plugin_configs.json  $(Build.ArtifactStagingDirectory)/
+
+        # Verifica o conteúdo dos arquivos JSON exportados
+        echo "Content of upstreams.json:"
+        cat $(Build.ArtifactStagingDirectory)/upstreams.json
+
+        echo "Fetching configurations from destination cluster..."
+        echo "APISIX_ADMIN_API_URL_DEST: $APISIX_ADMIN_API_URL_DEST"
+
+        # Obtém credenciais do AKS
+        az aks get-credentials --resource-group $(RESOURCE_GROUP_DEST) --name $(AKS_CLUSTER_DEST) --overwrite-existing --admin
+
+        # Configura a identidade do cluster para o kubectl
+        kubelogin convert-kubeconfig -l azurecli
+
+        # Define o nome do pod APISIX
+        APISIX_POD_DEST=$(kubectl get pods -n network-provisioner -l app.kubernetes.io/name=apisix -o jsonpath="{.items[0].metadata.name}")
+
+        # Faz o port-forward do pod APISIX para a máquina local
+        echo $APISIX_POD_DEST
+        kubectl port-forward -n network-provisioner $APISIX_POD_DEST 8888:9180 & PORT_FORWARD_PID_DEST=$!
+        sleep 5
+
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/upstreams" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_upstreams_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/routes" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_routes_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/services" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_services_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/consumers" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_consumers_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/ssls" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_ssls_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/global_rules" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_global_rules_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/plugin_configs" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_plugin_configs_url_dest.json
+        
+        echo "Content of bkp_upstreams_url_dest.json:"
+        cat $(Build.ArtifactStagingDirectory)/bkp_upstreams_url_dest.json
+        sleep 5
+
+        # Salva os dados no repositório
+        echo "Saving data to repository..."
+        git checkout apisix_data
+        mkdir -p ./FilesToImport/$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/bkp_upstreams_url_dest.json ./FilesToImport/$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/bkp_routes_url_dest.json ./FilesToImport/$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/bkp_services_url_dest.json ./FilesToImport/$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/bkp_consumers_url_dest.json ./FilesToImport/$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/bkp_ssls_url_dest.json ./FilesToImport/$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/bkp_global_rules_url_dest.json ./FilesToImport/$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/bkp_plugin_configs_url_dest.json ./FilesToImport/$ENV_FOLDER/
+        git add ./FilesToImport/$ENV_FOLDER/*.json
+        git commit -m "Add APISIX Environment Data logs $(Build.BuildId)"
+        git push -u origin apisix_data
+
+        # Instala o jq para JSON
+        sudo apt-get update && sudo apt-get install -y jq
+
+        # Import Upstreams
+        echo "Importing upstreams..."
+        jq -c '.list[].value' $(Build.ArtifactStagingDirectory)/upstreams.json | while IFS= read -r item; do
+            id=$(echo "$item" | jq -r '.id')
+            echo "ID: $id"
+            if [ "$id" == "null" ] || [ -z "$id" ]; then
+                echo "No valid ID found in the item. Skipping."
+                continue
+            fi
+            item=$(echo "$item" | jq 'del(.create_time, .update_time)')
+            echo "Processed Item:"
+            echo "URL: http://127.0.0.1:8888/apisix/admin/upstreams/$id"
+            curl -s -k -L -X -o /dev/null -w "%{http_code}" -X PUT "http://127.0.0.1:8888/apisix/admin/upstreams/$id" -H "X-API-KEY: $APISIX_API_KEY" -H "Content-Type: application/json" --data "$item"
+            echo "Finished upstreams..."
+        done
+
+        # Import Routes
+        echo "Importing routes..."
+        jq -c '.list[].value' $(Build.ArtifactStagingDirectory)/routes.json | while IFS= read -r item; do
+            id=$(echo "$item" | jq -r '.id')
+            echo "ID: $id"
+            if [ "$id" == "null" ] || [ -z "$id" ]; then
+                echo "No valid ID found in the item. Skipping."
+                continue
+            fi
+            item=$(echo "$item" | jq 'del(.create_time, .update_time)')
+            echo "Processed Item:"
+            echo "URL: http://127.0.0.1:8888/apisix/admin/routes/$id"
+            curl -s -k -L -X -o /dev/null -w "%{http_code}" -X PUT "http://127.0.0.1:8888/apisix/admin/routes/$id" -H "X-API-KEY: $APISIX_API_KEY" -H "Content-Type: application/json" --data "$item"
+            echo "Finished routes..."
+        done
+
+        # Import Services
+        echo "Importing services..."
+        jq -c '.list[].value' $(Build.ArtifactStagingDirectory)/services.json | while IFS= read -r item; do
+            id=$(echo "$item" | jq -r '.id')
+            echo "ID: $id"
+            if [ "$id" == "null" ] || [ -z "$id" ]; then
+                echo "No valid ID found in the item. Skipping."
+                continue
+            fi
+            item=$(echo "$item" | jq 'del(.create_time, .update_time)')
+            echo "Processed Item:"
+            echo "URL: http://127.0.0.1:8888/apisix/admin/services/$id"
+            curl -s -k -L -X -o /dev/null -w "%{http_code}" -X PUT "http://127.0.0.1:8888/apisix/admin/services/$id" -H "X-API-KEY: $APISIX_API_KEY" -H "Content-Type: application/json" --data "$item"
+            echo "Finished services..."
+        done
+
+        # Import Consumers
+        echo "Importing consumers..."
+        jq -c '.list[].value' $(Build.ArtifactStagingDirectory)/consumers.json | while IFS= read -r item; do
+            username=$(echo "$item" | jq -r '.username')
+            echo "Username: $username"
+            if [ "$username" == "null" ] || [ -z "$username" ]; then
+                echo "No valid username found in the item. Skipping."
+                continue
+            fi
+            item=$(echo "$item" | jq 'del(.create_time, .update_time)')
+            echo "Processed Item:"
+            echo "URL: http://127.0.0.1:8888/apisix/admin/consumers/$username"
+            curl -s -k -L -X -o /dev/null -w "%{http_code}" -X PUT "http://127.0.0.1:8888/apisix/admin/consumers/$username" -H "X-API-KEY: $APISIX_API_KEY" -H "Content-Type: application/json" --data "$item"
+            echo "Finished consumers..."
+        done
+
+        # Import SSL
+        echo "Importing ssls..."
+        jq -c '.list[].value' $(Build.ArtifactStagingDirectory)/ssls.json | while IFS= read -r item; do
+            id=$(echo "$item" | jq -r '.id')
+            echo "ID: $id"
+            if [ "$id" == "null" ] || [ -z "$id" ]; then
+                echo "No valid ID found in the item. Skipping."
+                continue
+            fi
+            item=$(echo "$item" | jq 'del(.create_time, .update_time)')
+            echo "Processed Item:"
+            echo "URL: http://127.0.0.1:8888/apisix/admin/ssls/$id"
+            curl -s -k -L -X -o /dev/null -w "%{http_code}" -X PUT "http://127.0.0.1:8888/apisix/admin/ssls/$id" -H "X-API-KEY: $APISIX_API_KEY" -H "Content-Type: application/json" --data "$item"
+            echo "Finished ssls..."
+        done
+
+        # Import Global Rules
+        echo "Importing global rules..."
+        jq -c '.list[].value' $(Build.ArtifactStagingDirectory)/global_rules.json | while IFS= read -r item; do
+            id=$(echo "$item" | jq -r '.id')
+            echo "ID: $id"
+            if [ "$id" == "null" ] || [ -z "$id" ]; then
+                echo "No valid ID found in the item. Skipping."
+                continue
+            fi
+            item=$(echo "$item" | jq 'del(.create_time, .update_time)')
+            echo "Processed Item:"
+            echo "URL: http://127.0.0.1:8888/apisix/admin/global_rules/$id"
+            curl -s -k -L -X -o /dev/null -w "%{http_code}" -X PUT "http://127.0.0.1:8888/apisix/admin/global_rules/$id" -H "X-API-KEY: $APISIX_API_KEY" -H "Content-Type: application/json" --data "$item"
+            echo "Finished global rules..."
+        done
+
+        # Import Plugin Configs
+        echo "Importing plugin configs..."
+        jq -c '.list[].value' $(Build.ArtifactStagingDirectory)/plugin_configs.json | while IFS= read -r item; do
+            id=$(echo "$item" | jq -r '.id')
+            echo "ID: $id"
+            if [ "$id" == "null" ] || [ -z "$id" ]; then
+                echo "No valid ID found in the item. Skipping."
+                continue
+            fi
+            item=$(echo "$item" | jq 'del(.create_time, .update_time)')
+            echo "Processed Item:"
+            echo "URL: http://127.0.0.1:8888/apisix/admin/plugin_configs/$id"
+            curl -s -k -L -X -o /dev/null -w "%{http_code}" -X PUT "http://127.0.0.1:8888/apisix/admin/plugin_configs/$id" -H "X-API-KEY: $APISIX_API_KEY" -H "Content-Type: application/json" --data "$item"
+            echo "Finished plugin configs..."
+        done
+
+        # Finaliza o port-forwarding
+        echo "Finishing up..."
+        kill $PORT_FORWARD_PID_DEST

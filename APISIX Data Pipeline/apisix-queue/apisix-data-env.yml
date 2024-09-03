@@ -1,0 +1,130 @@
+jobs:
+- job: ImportApisixDataFromEnv
+  displayName: Import Apisix Data From Environment
+  pool:
+    vmImage: ubuntu-latest
+  steps:
+  - task: AzureCLI@2
+    displayName: Connect to Azure Source
+    inputs:
+      azureSubscription: $(AZURE_SUBSCRIPTION)
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        # Autentica usando o Service Principal
+        az login --service-principal -u $(servicePrincipalId) -p $(servicePrincipalKey) --tenant $(tenantId)
+
+        # Instala o Azure CLI AKS extension
+        az aks install-cli
+
+        # ##############################################SOURCE
+        # Exporta configurações do cluster de origem
+        echo "Fetching configurations from ENVIRONMENT..."
+        echo "APISIX_ADMIN_API_URL_SRC: $APISIX_ADMIN_API_URL_SRC"
+
+        # Obtém credenciais do AKS
+        az aks get-credentials --resource-group $(RESOURCE_GROUP) --name $(AKS_CLUSTER) --overwrite-existing --admin
+
+        # Configura a identidade do cluster para o kubectl
+        kubelogin convert-kubeconfig -l azurecli
+
+        # Define o nome do pod APISIX
+        APISIX_POD=$(kubectl get pods -n network-provisioner -l app.kubernetes.io/name=apisix -o jsonpath="{.items[0].metadata.name}")
+
+        # Faz o port-forward do pod APISIX para a máquina local
+        echo $APISIX_POD
+        kubectl port-forward -n network-provisioner $APISIX_POD 9999:9180 & PORT_FORWARD_PID=$!
+        sleep 5
+
+        # Exporta dados do APISIX para arquivos JSON
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:9999/apisix/admin/upstreams" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/upstreams.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:9999/apisix/admin/routes" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/routes.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:9999/apisix/admin/services" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/services.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:9999/apisix/admin/consumers" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/consumers.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:9999/apisix/admin/ssls" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/ssls.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:9999/apisix/admin/global_rules" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/global_rules.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:9999/apisix/admin/plugin_configs" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/plugin_configs.json
+
+        # Remove redirecionamento de porta
+        kill $PORT_FORWARD_PID
+        sleep 5        
+
+  - task: AzureCLI@2
+    displayName: Connect to Azure Destination
+    inputs:
+      azureSubscription: $(AZURE_SUBSCRIPTION_DEST)
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        # Autentica usando o Service Principal
+        az login --service-principal -u $(servicePrincipalId) -p $(servicePrincipalKey) --tenant $(tenantId)
+
+        # Instala o Azure CLI AKS extension
+        az aks install-cli        
+
+        # ##############################################DESTINATION
+        echo "Fetching configurations from destination cluster..."
+        echo "APISIX_ADMIN_API_URL_DEST: $APISIX_ADMIN_API_URL_DEST"
+
+        # Obtém credenciais do AKS
+        az aks get-credentials --resource-group $(RESOURCE_GROUP_DEST) --name $(AKS_CLUSTER_DEST) --overwrite-existing --admin
+
+        # Configura a identidade do cluster para o kubectl
+        kubelogin convert-kubeconfig -l azurecli
+
+        # Define o nome do pod APISIX
+        APISIX_POD_DEST=$(kubectl get pods -n network-provisioner -l app.kubernetes.io/name=apisix -o jsonpath="{.items[0].metadata.name}")
+
+        # Faz o port-forward do pod APISIX para a máquina local
+        echo $APISIX_POD_DEST
+        kubectl port-forward -n network-provisioner $APISIX_POD_DEST 8888:9180 & PORT_FORWARD_PID_DEST=$!
+        sleep 5
+
+        # Realiza backup dos dados no destino
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/upstreams" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_upstreams_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/routes" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_routes_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/services" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_services_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/consumers" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_consumers_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/ssls" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_ssls_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/global_rules" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_global_rules_url_dest.json
+        curl -k -L --connect-timeout 10 --max-time 30 -X GET "http://127.0.0.1:8888/apisix/admin/plugin_configs" -H "X-API-KEY: $APISIX_API_KEY" > $(Build.ArtifactStagingDirectory)/bkp_plugin_configs_url_dest.json
+        
+        # Verifica o conteúdo dos arquivos JSON exportados
+        echo "Content of bkp_upstreams_url_dest.json:"
+        cat $(Build.ArtifactStagingDirectory)/bkp_upstreams_url_dest.json
+        sleep 5
+
+        # Salva os dados no repositorio
+        echo "Saving data to repository..."
+        git config --global user.email "your_email@example.com"
+        git config --global user.name "your_username"
+        git remote set-url origin https://$(System.AccessToken)@your_azure_repo_url
+        git fetch --prune
+        git checkout apisix_data
+        mkdir -p ./$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/upstreams.json ./$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/routes.json ./$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/services.json ./$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/consumers.json ./$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/ssls.json ./$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/global_rules.json ./$ENV_FOLDER/
+        cp $(Build.ArtifactStagingDirectory)/plugin_configs.json ./$ENV_FOLDER/
+        git add ./$ENV_FOLDER/*.json
+        git commit -m "Add APISIX Environment Data logs $(Build.BuildId)"
+        git push -u origin apisix_data
+          
+        # Instala o jq
+        apt-get update && apt-get install -y jq
+
+        # Carrega dados do APISIX no destino
+        cat $(Build.ArtifactStagingDirectory)/upstreams.json | jq -c '.upstreams[]' | while read i; do curl -k -L -X PUT http://127.0.0.1:8888/apisix/admin/upstreams -d "$i" -H "X-API-KEY: $APISIX_API_KEY"; done
+        cat $(Build.ArtifactStagingDirectory)/routes.json | jq -c '.routes[]' | while read i; do curl -k -L -X PUT http://127.0.0.1:8888/apisix/admin/routes -d "$i" -H "X-API-KEY: $APISIX_API_KEY"; done
+        cat $(Build.ArtifactStagingDirectory)/services.json | jq -c '.services[]' | while read i; do curl -k -L -X PUT http://127.0.0.1:8888/apisix/admin/services -d "$i" -H "X-API-KEY: $APISIX_API_KEY"; done
+        cat $(Build.ArtifactStagingDirectory)/consumers.json | jq -c '.consumers[]' | while read i; do curl -k -L -X PUT http://127.0.0.1:8888/apisix/admin/consumers -d "$i" -H "X-API-KEY: $APISIX_API_KEY"; done
+        cat $(Build.ArtifactStagingDirectory)/ssls.json | jq -c '.ssls[]' | while read i; do curl -k -L -X PUT http://127.0.0.1:8888/apisix/admin/ssls -d "$i" -H "X-API-KEY: $APISIX_API_KEY"; done
+        cat $(Build.ArtifactStagingDirectory)/global_rules.json | jq -c '.global_rules[]' | while read i; do curl -k -L -X PUT http://127.0.0.1:8888/apisix/admin/global_rules -d "$i" -H "X-API-KEY: $APISIX_API_KEY"; done
+        cat $(Build.ArtifactStagingDirectory)/plugin_configs.json | jq -c '.plugin_configs[]' | while read i; do curl -k -L -X PUT http://127.0.0.1:8888/apisix/admin/plugin_configs -d "$i" -H "X-API-KEY: $APISIX_API_KEY"; done
+
+        # Remove redirecionamento de porta
+        kill $PORT_FORWARD_PID_DEST
+        sleep 5

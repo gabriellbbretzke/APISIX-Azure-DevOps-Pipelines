@@ -1,0 +1,142 @@
+trigger: none
+
+parameters:
+- name: environment
+  displayName: Qual o ambiente para deploy?                                          
+  type: string
+  default: DEV
+  values:
+  - DEV
+  - SIT
+  - UAT
+  - PREPRD
+  - PRD
+
+- name: datasource
+  displayName: Qual a origem dos dados? Verificar melhor opção conforme descrição no deploys acima.
+  type: string
+  default: REPOSITORY
+  values:
+  - REPOSITORY
+  - ENVIRONMENT
+
+variables:
+  - name: environment
+    value: ${{ parameters.environment }}
+  - name: datasource
+    value: ${{ parameters.datasource }}
+  - name: APISIX_ADMIN_API_URL_SRC
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: http://admin-api-preprd.example.com/apisix/admin
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: http://admin-api-uat.example.com/apisix/admin
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: http://admin-api-sit.example.com/apisix/admin
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: http://admin-api-dev.example.com/apisix/admin
+  - name: APISIX_ADMIN_API_URL_DEST
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: http://admin-api-prd.example.com/apisix/admin
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: http://admin-api-preprd.example.com/apisix/admin
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: http://admin-api-uat.example.com/apisix/admin
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: http://admin-api-sit.example.com/apisix/admin
+    ${{ if eq( parameters['environment'], 'DEV') }}:
+      value: http://admin-api-dev.example.com/apisix/admin
+  - name: APISIX_API_KEY
+    value: <API_KEY>
+  - name: AZURE_SUBSCRIPTION
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: ITPREPRODSubscription
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: ITUATSubscription
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: ITSITSubscription
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: ITDEVSubscription
+  - name: RESOURCE_GROUP
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: ITPREPRDAKSRG
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: ITUATAKSRG
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: itsitaksrg
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: itdevaksrg     
+  - name: AKS_CLUSTER
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: akspreprd001
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: aksuat001
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: akssit001
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: aksdev001
+  - name: AKS_NAMESPACE
+    value: app-namespace
+  - name: ENV_FOLDER
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: PRD
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: PREPRD
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: UAT
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: SIT
+    ${{ if eq( parameters['environment'], 'DEV') }}:
+      value: DEV
+  - name: AZURE_SUBSCRIPTION_DEST
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: ITPRDSubscription
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: ITPREPROD-Subscription
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: ITUATSubscription
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: ITSITSubscription
+    ${{ if eq( parameters['environment'], 'DEV') }}:
+      value: ITDEVSubscription
+  - name: RESOURCE_GROUP_DEST
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: itprdaksrg
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: ITPREPRDAKSRG
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: ITUATAKSRG
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: itsitaksrg
+    ${{ if eq( parameters['environment'], 'DEV') }}:
+      value: itdevaksrg
+  - name: AKS_CLUSTER_DEST
+    ${{ if eq( parameters['environment'], 'PRD') }}:
+      value: aksprd001
+    ${{ if eq( parameters['environment'], 'PREPRD') }}:
+      value: akspreprd001
+    ${{ if eq( parameters['environment'], 'UAT') }}:
+      value: aksuat001
+    ${{ if eq( parameters['environment'], 'SIT') }}:
+      value: akssit001
+    ${{ if eq( parameters['environment'], 'DEV') }}:
+      value: aksdev001
+
+name: ${{ parameters.environment }}-$(Build.BuildId)
+
+resources:
+  repositories:
+    - repository: devops
+      type: git
+      name: ExampleRepository
+      ref: devops
+
+stages:
+- stage: Environment
+  condition: eq(variables['datasource'], 'ENVIRONMENT')
+  jobs:
+  - template: apisix-queue/apisix-data-env.yml@devops
+
+- stage: Repository
+  condition: eq(variables['datasource'], 'REPOSITORY')
+  jobs:
+  - template: apisix-queue/apisix-data-repo.yml@devops
